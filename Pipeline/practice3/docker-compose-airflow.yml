@@ -1,0 +1,105 @@
+version: '3'
+
+services:
+    # postgres used by airflow
+    postgres:
+      image: postgres:9.6
+      volumes: 
+          # Create Test database on Postgresql
+          - ./docker-airflow/pg-init-scripts:/docker-entrypoint-initdb.d
+      environment:
+          - POSTGRES_USER=airflow
+          - POSTGRES_PASSWORD=airflow
+          - POSTGRES_DB=airflow
+      ports:
+          - "5432:5432"
+
+    # airflow LocalExecutor
+    airflow-webserver:
+      image: docker-airflow-spark:1.10.7_3.1.2
+      restart: always
+      depends_on:
+        - postgres
+      environment:
+        - LOAD_EX=n
+        - EXECUTOR=Local
+      volumes:
+        - ./assets/airflow/dags:/opt/airflow/dags #DAG folder
+        - ./data/airflow/logs:/opt/airflow/logs
+        - ./assets/airflow/plugins:/opt/airflow/plugins
+        - ../spark/app:/usr/local/spark/app #Spark Scripts (Must be the same path in airflow and Spark Cluster)
+        - ../spark/resources:/usr/local/spark/resources #Resources folder (Must be the same path in airflow and Spark Cluster)
+      ports:
+        - "8282:8282"
+      command: webserver
+      healthcheck:
+        test: ["CMD-SHELL", "[ -f /usr/local/airflow/airflow-webserver.pid ]"]
+        interval: 30s
+        timeout: 30s
+        retries: 3
+    
+    spark-master:
+      build:
+        context: .
+        dockerfile: ./assets/spark/Dockerfile 
+      image: my-spark:0.1
+      container_name: spark-master
+      ports:
+        - 8080:8080 # master webui
+        - 7077:7077 # master port
+      environment:
+        - SPARK_MODE=master
+        - SPARK_MASTER_HOST=spark-master
+        - SPARK_MASTER_PORT=7077
+        - SPARK_MASTER_WEBUI_PORT=8080
+      volumes: 
+        - ./assets/spark:/spark-work
+        - ./assets/spark/conf:/opt/spark/conf
+        - ./assets/spark/checkpoint:/opt/spark/tmp/dtn/checkpoint
+
+    # 스파크 워커3개
+    spark-worker:
+        build:
+          context: .
+          dockerfile: ./assets/spark/Dockerfile 
+        image: my-spark:0.1
+        deploy:
+          replicas: 3
+        environment:
+          - SPARK_MODE=worker
+          - SPARK_MASTER=spark://spark-master:7077
+          - SPARK_WORKER_MEMORY=2G
+          - SPARK_WORKER_CORES=2
+        ports:
+          - 18080-18089:8081
+        volumes:
+        - ./assets/spark/conf:/opt/spark/conf
+        depends_on:
+          - spark-master
+
+    zeppelin:
+      build:
+        context: .
+        dockerfile: ./assets/spark/Dockerfile
+      image: my-spark:0.1
+      container_name: zeppelin
+      environment:
+        - SPARK_MODE=zeppelin
+        - ZEPPELIN_PORT=8080
+        - ZEPPELIN_LOG_DIR=/logs
+        - ZEPPELIN_NOTEBOOK_DIR=/notebook
+        - SPARK_MASTER=spark://spark-master:7077
+        # - USE_HADOOP=false
+        # - SPARK_SUBMIT_OPTIONS=--total-executor-cores 4 --name zeppelin
+      ports:
+        - 18090:8080
+      volumes:
+        - ./data/zeppelin/logs:/logs
+        # - ./data/zeppelin/data:/data
+        - ./assets/zeppelin/notebook:/notebook
+        - ./assets/zeppelin/conf:/opt/zeppelin/conf
+
+networks:
+  default:
+    name: hy22-external-network
+    external: true
